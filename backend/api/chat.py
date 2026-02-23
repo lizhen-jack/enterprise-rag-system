@@ -1,20 +1,57 @@
 """
-对话与检索API
-RAG问答、长期记忆集成、上下文管理
+对话和RAG API
+智能问答、语义检索、长期记忆
 """
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
-from typing import List
+from pydantic import BaseModel
+from typing import List, Optional
 
 from core.database import get_db
+from core.security import get_current_user
 from models.user import User
-from models.conversation import Conversation, Message, ConversationCreate, ConversationPublic, MessagePublic, ChatRequest, ChatResponse
-from api.users import get_current_user
+from models.conversation import Conversation, Message
 from services.rag_service import RAGService, MemoryService
+from sqlalchemy import select
 
 router = APIRouter()
+
+
+class ChatRequest(BaseModel):
+    """聊天请求"""
+    message: str
+    conversation_id: Optional[int] = None
+    document_ids: Optional[List[int]] = None
+    user_prompt: str = ""
+    temperature: float = 0.7
+
+
+class ChatResponse(BaseModel):
+    """聊天响应"""
+    message_id: int
+    conversation_id: int
+    response: str
+    sources: List[dict]
+    created_at: str
+
+
+class MemoryRequest(BaseModel):
+    """添加记忆请求"""
+    content: str
+    importance: float = 0.5
+    category: str = None
+    tags: List[str] = None
+
+
+def get_rag_service(db: AsyncSession = Depends(get_db)) -> RAGService:
+    """获取RAGService实例"""
+    return RAGService(db)
+
+
+def get_memory_service(db: AsyncSession = Depends(get_db)) -> MemoryService:
+    """获取MemoryService实例"""
+    return MemoryService(db)
 
 
 @router.post("/chat", response_model=ChatResponse)
@@ -23,15 +60,20 @@ async def chat(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
-    """RAG对话（集成文档检索+长期记忆）"""
-    from datetime import datetime
+    """智能对话（RAG）"""
+    rag_service = get_rag_service(db)
 
-    rag_service = RAGService()
-    memory_service = MemoryService(db)
-
-    # 创建或获取对话
-    conversation_id = request.conversation_id
-    if conversation_id is None:
+    # 获取或创建对话
+    if request.conversation_id:
+        query = select(Conversation).where(
+            Conversation.id == request.conversation_id,
+            Conversation.user_id == current_user.id
+        )
+        result = await db.execute(query)
+        conversation = result.scalar_one_or_none()
+        if not conversation:
+            raise HTTPException(status_code=404, detail="对话不存在")
+    else:
         # 创建新对话
         conversation = Conversation(
             user_id=current_user.id,
@@ -40,163 +82,220 @@ async def chat(
         db.add(conversation)
         await db.commit()
         await db.refresh(conversation)
-        conversation_id = conversation.id
-    else:
-        # 获取现有对话
-        result = await db.execute(
-            select(Conversation).where(
-                Conversation.id == conversation_id,
-                Conversation.user_id == current_user.id
-            )
-        )
-        conversation = result.scalar_one_or_none()
 
-        if not conversation:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="对话不存在"
-            )
+    # 获取对话历史
+    history_query = select(Message).where(
+        Message.conversation_id == conversation.id
+    ).order_by(Message.created_at)
+    history_result = await db.execute(history_query)
+    messages = history_result.scalars().all()
+
+    conversation_history = [
+        {"role": msg.role, "content": msg.content}
+        for msg in messages[-20:]  # 最近20条
+    ]
+
+    # RAG生成回复
+    result = await rag_service.chat(
+        query=request.message,
+        user_id=current_user.id,
+        conversation_history=conversation_history,
+        user_prompt=request.user_prompt,
+        document_ids=request.document_ids,
+        temperature=request.temperature
+    )
 
     # 保存用户消息
     user_message = Message(
-        conversation_id=conversation_id,
-        user_id=current_user.id,
-        content=request.message,
-        message_type="user"
+        conversation_id=conversation.id,
+        role="user",
+        content=request.message
     )
     db.add(user_message)
     await db.commit()
 
-    # 收集上下文
-    context_parts = []
-
-    # 1. 文档检索
-    document_sources = []
-    if request.use_rag:
-        search_results = await rag_service.search(
-            query=request.message,
-            user_id=current_user.id,
-            top_k=request.top_k
-        )
-        document_sources = search_results
-
-        for result in search_results:
-            context_parts.append(f"[文档: {result['document_title']}]\n{result['content']}\n")
-
-    # 2. 长期记忆检索
-    memory_sources = []
-    if request.use_memory:
-        memories = await memory_service.retrieve_memories(
-            user_id=current_user.id,
-            limit=3
-        )
-        memory_sources = [{"content": mem.content, "category": mem.category} for mem in memories]
-
-        for memory in memories:
-            context_parts.append(f"[记忆: {memory.category or '通用'}]\n{memory.content}\n")
-
-    # 获取对话历史
-    history_result = await db.execute(
-        select(Message)
-        .where(Message.conversation_id == conversation_id)
-        .order_by(Message.created_at.desc())
-        .limit(20)
+    # 保存AI回复
+    ai_message = Message(
+        conversation_id=conversation.id,
+        role="assistant",
+        content=result["response"],
+        sources=result.get("sources", [])
     )
-    history_messages = [
-        {"role": "user" if m.message_type == "user" else "assistant", "content": m.content}
-        for m in reversed(history_messages.scalars().all())
-        if m.message_type in ["user", "assistant"]
-    ]
-
-    # 构建上下文
-    context = "\n\n".join(context_parts) if context_parts else "暂无相关上下文信息。"
-
-    # 生成AI回复
-    try:
-        reply = await rag_service.chat(
-            query=request.message,
-            context=context,
-            conversation_history=history_messages,
-            temperature=request.temperature
-        )
-    except Exception as e:
-        print(f"AI回复生成失败: {e}")
-        reply = f"抱歉，生成回复时出现错误：{str(e)}"
-
-    # 保存AI消息
-    assistant_message = Message(
-        conversation_id=conversation_id,
-        user_id=current_user.id,
-        content=reply,
-        message_type="assistant",
-        retrieval_context=context[:2000]  # 截断过长上下文
-    )
-    db.add(assistant_message)
-
-    # 更新对话信息
-    conversation.message_count += 2
-    conversation.updated_at = datetime.utcnow()
-
+    db.add(ai_message)
     await db.commit()
-    await db.refresh(assistant_message)
+    await db.refresh(ai_message)
 
     return ChatResponse(
-        message_id=assistant_message.id,
-        conversation_id=conversation_id,
-        reply=reply,
-        sources=document_sources,
-        memories=memory_sources
+        message_id=ai_message.id,
+        conversation_id=conversation.id,
+        response=result["response"],
+        sources=result.get("sources", []),
+        created_at=ai_message.created_at.isoformat()
     )
 
 
-@router.get("/conversations", response_model=List[ConversationPublic])
+@router.get("/conversations")
 async def list_conversations(
-    skip: int = 0,
     limit: int = 20,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
     """获取对话列表"""
-    result = await db.execute(
-        select(Conversation)
-        .where(Conversation.user_id == current_user.id)
-        .order_by(Conversation.updated_at.desc())
-        .offset(skip)
-        .limit(limit)
-    )
+    query = select(Conversation).where(
+        Conversation.user_id == current_user.id
+    ).order_by(Conversation.updated_at.desc()).limit(limit)
+
+    result = await db.execute(query)
     conversations = result.scalars().all()
-    return conversations
+
+    return {
+        "conversations": [
+            {
+                "id": conv.id,
+                "title": conv.title,
+                "created_at": conv.created_at.isoformat(),
+                "updated_at": conv.updated_at.isoformat()
+            }
+            for conv in conversations
+        ]
+    }
 
 
-@router.get("/conversations/{conversation_id}/messages", response_model=List[MessagePublic])
-async def get_messages(
+@router.get("/conversations/{conversation_id}/messages")
+async def get_conversation_messages(
     conversation_id: int,
-    skip: int = 0,
-    limit: int = 50,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
     """获取对话消息"""
-    # 验证对话归属
-    conv_result = await db.execute(
-        select(Conversation).where(
-            Conversation.id == conversation_id,
-            Conversation.user_id == current_user.id
-        )
+    # 验证权限
+    query = select(Conversation).where(
+        Conversation.id == conversation_id,
+        Conversation.user_id == current_user.id
     )
-    if not conv_result.scalar_one_or_none():
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="对话不存在"
-        )
+    result = await db.execute(query)
+    conversation = result.scalar_one_or_none()
+
+    if not conversation:
+        raise HTTPException(status_code=404, detail="对话不存在")
 
     # 获取消息
-    result = await db.execute(
-        select(Message)
-        .where(Message.conversation_id == conversation_id)
-        .order_by(Message.created_at.asc())
-        .offset(skip)
-        .limit(limit)
+    messages_query = select(Message).where(
+        Message.conversation_id == conversation_id
+    ).order_by(Message.created_at)
+
+    messages_result = await db.execute(messages_query)
+    messages = messages_result.scalars().all()
+
+    return {
+        "conversation_id": conversation_id,
+        "title": conversation.title,
+        "messages": [
+            {
+                "id": msg.id,
+                "role": msg.role,
+                "content": msg.content,
+                "sources": msg.sources,
+                "created_at": msg.created_at.isoformat()
+            }
+            for msg in messages
+        ]
+    }
+
+
+@router.delete("/conversations/{conversation_id}")
+async def delete_conversation(
+    conversation_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """删除对话"""
+    # 验证权限
+    query = select(Conversation).where(
+        Conversation.id == conversation_id,
+        Conversation.user_id == current_user.id
     )
-    messages = result.scalars().all()
-    return messages
+    result = await db.execute(query)
+    conversation = result.scalar_one_or_none()
+
+    if not conversation:
+        raise HTTPException(status_code=404, detail="对话不存在")
+
+    # 删除消息
+    await db.execute(
+        select(Message).where(Message.conversation_id == conversation_id)
+    )
+
+    # 删除对话
+    await db.delete(conversation)
+    await db.commit()
+
+    return {"message": "对话删除成功"}
+
+
+@router.post("/memory")
+async def add_memory(
+    request: MemoryRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """添加长期记忆"""
+    memory_service = get_memory_service(db)
+
+    memory = await memory_service.add_memory(
+        user_id=current_user.id,
+        content=request.content,
+        importance=request.importance,
+        category=request.category,
+        tags=request.tags
+    )
+
+    return memory
+
+
+@router.get("/memory")
+async def get_memories(
+    query: str = None,
+    category: str = None,
+    min_importance: float = 0.7,
+    limit: int = 5,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """检索长期记忆"""
+    memory_service = get_memory_service(db)
+
+    memories = await memory_service.retrieve_memories(
+        user_id=current_user.id,
+        query=query,
+        category=category,
+        min_importance=min_importance,
+        limit=limit
+    )
+
+    return {"memories": memories}
+
+
+@router.delete("/memory/{memory_id}")
+async def delete_memory(
+    memory_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """删除长期记忆"""
+    from models.memory import Memory
+
+    query = select(Memory).where(
+        Memory.id == memory_id,
+        Memory.user_id == current_user.id
+    )
+    result = await db.execute(query)
+    memory = result.scalar_one_or_none()
+
+    if not memory:
+        raise HTTPException(status_code=404, detail="记忆不存在")
+
+    await db.delete(memory)
+    await db.commit()
+
+    return {"message": "记忆删除成功"}

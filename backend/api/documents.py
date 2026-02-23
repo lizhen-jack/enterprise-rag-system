@@ -1,188 +1,135 @@
 """
 文档管理API
-文档上传、索引、查询、删除
+上传、删除、查询文档
 """
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, status
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
 from typing import List
 import os
+import uuid
 
 from core.database import get_db
-from core.config import settings
+from core.security import get_current_user
 from models.user import User
-from models.document import Document, DocumentCreate, DocumentPublic, DocumentUpdate
-from api.users import get_current_user
 from services.document_service import DocumentService
+from services.rag_service import RAGService
+from core.config import settings
 
 router = APIRouter()
 
 
-@router.post("/upload", response_model=DocumentPublic, status_code=status.HTTP_201_CREATED)
+def get_document_service(db: AsyncSession = Depends(get_db)) -> DocumentService:
+    """获取DocumentService实例"""
+    rag_service = RAGService(db)
+    return DocumentService(db, rag_service)
+
+
+@router.post("/upload")
 async def upload_document(
     file: UploadFile = File(...),
-    title: str = None,
-    description: str = None,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
-    """上传文档并启动索引处理"""
+    """上传文档"""
     # 验证文件类型
-    file_ext = file.filename.split('.')[-1].lower()
-    if file_ext not in settings.ALLOWED_EXTENSIONS:
+    ext = os.path.splitext(file.filename)[1].lower()[1:]
+    if ext not in settings.ALLOWED_EXTENSIONS:
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"不支持的文件类型，允许的类型: {', '.join(settings.ALLOWED_EXTENSIONS)}"
+            status_code=400,
+            detail=f"不支持此文件类型。支持的格式: {', '.join(settings.ALLOWED_EXTENSIONS)}"
         )
 
     # 验证文件大小
-    file_size = 0
     content = await file.read()
-    file_size = len(content)
-
-    if file_size > settings.MAX_FILE_SIZE:
+    if len(content) > settings.MAX_FILE_SIZE:
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
+            status_code=400,
             detail=f"文件大小超过限制（最大 {settings.MAX_FILE_SIZE // (1024*1024)}MB）"
         )
 
     # 保存文件
-    user_upload_dir = os.path.join(settings.UPLOAD_DIR, str(current_user.id))
-    os.makedirs(user_upload_dir, exist_ok=True)
+    upload_dir = settings.UPLOAD_DIR
+    os.makedirs(upload_dir, exist_ok=True)
 
-    file_path = os.path.join(user_upload_dir, f"{file.filename}")
+    # 生成唯一文件名
+    unique_filename = f"{uuid.uuid4()}_{file.filename}"
+    file_path = os.path.join(upload_dir, unique_filename)
 
-    with open(file_path, "wb") as f:
+    async with open(file_path, "wb") as f:
         f.write(content)
 
-    # 创建文档记录
-    document = Document(
+    # 创建文档记录并处理
+    doc_service = get_document_service(db)
+    document = await doc_service.upload_document(
         user_id=current_user.id,
-        title=title or file.filename,
-        description=description,
-        file_type=file_ext,
-        file_size=file_size,
         file_path=file_path,
-        status="processing"
+        filename=file.filename,
+        file_size=len(content),
+        mime_type=file.content_type or "application/octet-stream"
     )
 
-    db.add(document)
-    await db.commit()
-    await db.refresh(document)
-
-    # 异步启动文档索引（后台任务）
-    # 使用Celery或简单异步任务
-    try:
-        doc_service = DocumentService(db)
-        await doc_service.index_document(document.id)
-    except Exception as e:
-        print(f"文档索引失败: {e}")
-        document.status = "failed"
-        await db.commit()
-
-    return document
+    return {
+        "id": document.id,
+        "filename": document.filename,
+        "status": document.status,
+        "chunk_count": document.chunk_count,
+        "total_chars": document.total_chars,
+        "created_at": document.created_at.isoformat()
+    }
 
 
-@router.get("", response_model=List[DocumentPublic])
+@router.get("")
 async def list_documents(
-    skip: int = 0,
-    limit: int = 20,
+    status: str = None,
+    limit: int = 100,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
-    """获取用户的文档列表"""
-    result = await db.execute(
-        select(Document)
-        .where(Document.user_id == current_user.id)
-        .order_by(Document.created_at.desc())
-        .offset(skip)
-        .limit(limit)
-    )
-    documents = result.scalars().all()
-    return documents
+    """获取文档列表"""
+    doc_service = get_document_service(db)
+    documents = await doc_service.get_user_documents(current_user.id, status, limit)
+
+    return {
+        "documents": [
+            {
+                "id": doc.id,
+                "filename": doc.filename,
+                "status": doc.status,
+                "chunk_count": doc.chunk_count,
+                "total_chars": doc.total_chars,
+                "created_at": doc.created_at.isoformat(),
+                "processed_at": doc.processed_at.isoformat() if doc.processed_at else None,
+                "error_message": doc.error_message
+            }
+            for doc in documents
+        ]
+    }
 
 
-@router.get("/{document_id}", response_model=DocumentPublic)
-async def get_document(
-    document_id: int,
+@router.get("/stats")
+async def get_document_stats(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
-    """获取文档详情"""
-    result = await db.execute(
-        select(Document)
-        .where(Document.id == document_id, Document.user_id == current_user.id)
-    )
-    document = result.scalar_one_or_none()
+    """获取文档统计"""
+    doc_service = get_document_service(db)
+    stats = await doc_service.get_document_stats(current_user.id)
 
-    if not document:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="文档不存在"
-        )
-
-    return document
+    return stats
 
 
-@router.put("/{document_id}", response_model=DocumentPublic)
-async def update_document(
-    document_id: int,
-    document_update: DocumentUpdate,
-    current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db)
-):
-    """更新文档信息"""
-    result = await db.execute(
-        select(Document)
-        .where(Document.id == document_id, Document.user_id == current_user.id)
-    )
-    document = result.scalar_one_or_none()
-
-    if not document:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="文档不存在"
-        )
-
-    for field, value in document_update.dict(exclude_unset=True).items():
-        if value is not None:
-            setattr(document, field, value)
-
-    await db.commit()
-    await db.refresh(document)
-
-    return document
-
-
-@router.delete("/{document_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/{document_id}")
 async def delete_document(
     document_id: int,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
     """删除文档"""
-    result = await db.execute(
-        select(Document)
-        .where(Document.id == document_id, Document.user_id == current_user.id)
-    )
-    document = result.scalar_one_or_none()
+    doc_service = get_document_service(db)
+    success = await doc_service.delete_document(document_id, current_user.id)
 
-    if not document:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="文档不存在"
-        )
+    if not success:
+        raise HTTPException(status_code=404, detail="文档不存在或无权限")
 
-    # 删除文件
-    if os.path.exists(document.file_path):
-        os.remove(document.file_path)
-
-    # 从数据库删除
-    await db.delete(document)
-    await db.commit()
-
-    # 删除向量数据（待实现）
-    # await delete_from_vector_db(document_id)
-
-    return None
+    return {"message": "文档删除成功"}

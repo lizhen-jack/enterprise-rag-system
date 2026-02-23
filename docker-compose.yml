@@ -1,20 +1,25 @@
 version: '3.8'
 
 services:
-  # PostgreSQL 数据库
+  # PostgreSQL数据库
   postgres:
-    image: postgres:15
+    image: postgres:15-alpine
+    container_name: rag-postgres
     environment:
-      POSTGRES_DB: rag_db
       POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: password
-    ports:
-      - "5432:5432"
+      POSTGRES_PASSWORD: rag_password
+      POSTGRES_DB: rag_db
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    networks:
+      - rag-network
+    restart: unless-stopped
 
-  # Milvus 向量数据库
+  # Milvus向量数据库（简化版，standalone）
   etcd:
+    container_name: milvus-etcd
     image: quay.io/coreos/etcd:v3.5.5
     environment:
       - ETCD_AUTO_COMPACTION_MODE=revision
@@ -22,23 +27,33 @@ services:
       - ETCD_QUOTA_BACKEND_BYTES=4294967296
       - ETCD_SNAPSHOT_COUNT=50000
     volumes:
-      - milvus_etcd:/etcd
+      - etcd_data:/etcd
     command: etcd -advertise-client-urls=http://127.0.0.1:2379 -listen-client-urls http://0.0.0.0:2379 --data-dir /etcd
+    networks:
+      - rag-network
+    restart: unless-stopped
 
   minio:
+    container_name: milvus-minio
     image: minio/minio:RELEASE.2023-03-20T20-16-18Z
     environment:
       MINIO_ACCESS_KEY: minioadmin
       MINIO_SECRET_KEY: minioadmin
-    ports:
-      - "9001:9001"
-      - "9000:9000"
     volumes:
-      - milvus_minio:/minio_data
-    command: minio server /minio_data --console-address ":9001"
+      - minio_data:/minio_data
+    command: minio server /minio_data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+    networks:
+      - rag-network
+    restart: unless-stopped
 
-  standalone:
-    image: milvusdb/milvus:latest
+  milvus:
+    container_name: milvus-standalone
+    image: milvusdb/milvus:v2.3.3
     command: ["milvus", "run", "standalone"]
     environment:
       ETCD_ENDPOINTS: etcd:2379
@@ -51,45 +66,73 @@ services:
     depends_on:
       - "etcd"
       - "minio"
+    networks:
+      - rag-network
+    restart: unless-stopped
 
-  # Redis
+  # Redis缓存
   redis:
-    image: redis:7
-    ports:
-      - "6379:6379"
+    image: redis:7-alpine
+    container_name: rag-redis
     volumes:
       - redis_data:/data
+    ports:
+      - "6379:6379"
+    networks:
+      - rag-network
+    restart: unless-stopped
 
-  # 后端API
+  # FastAPI后端
   backend:
-    build: ./backend
-    command: uvicorn main:app --host 0.0.0.0 --port 8000
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: rag-backend
+    environment:
+      DATABASE_URL: postgresql+asyncpg://postgres:rag_password@postgres/rag_db
+      MILVUS_HOST: milvus
+      MILVUS_PORT: 19530
+      REDIS_URL: redis://redis:6379/0
+      BAIYUN_API_KEY: ${BAIYUN_API_KEY}
+      SECRET_KEY: ${SECRET_KEY:-rag-secret-key-2024}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost,http://120.48.89.60}
+    volumes:
+      - ./backend:/app
+      - ./uploads:/app/uploads
     ports:
       - "8000:8000"
     depends_on:
       - postgres
+      - milvus
       - redis
-      - standalone
-    environment:
-      DATABASE_URL: postgresql+asyncpg://postgres:password@postgres/rag_db
-      REDIS_URL: redis://redis:6379/0
-      MILVUS_HOST: standalone
-      MILVUS_PORT: 19530
-    volumes:
-      - ./backend:/app
-      - ./uploads:/app/uploads
+    networks:
+      - rag-network
+    command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+    restart: unless-stopped
 
-  # 前端
+  # Vue前端（Nginx）
   frontend:
-    build: ./frontend
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: rag-frontend
+    volumes:
+      - ./frontend/nginx.conf:/etc/nginx/nginx.conf
     ports:
       - "80:80"
     depends_on:
       - backend
+    networks:
+      - rag-network
+    restart: unless-stopped
+
+networks:
+  rag-network:
+    driver: bridge
 
 volumes:
   postgres_data:
-  milvus_etcd:
-  milvus_minio:
   milvus_data:
+  etcd_data:
+  minio_data:
   redis_data:
