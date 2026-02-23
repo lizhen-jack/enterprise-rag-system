@@ -13,8 +13,8 @@ class ConversationBase(SQLModel):
     """对话基础信息"""
     title: str = Field(max_length=200)
     context_summary: Optional[str] = Field(default=None, max_length=1000)
-    # 用户上下文元数据（存储JSON）
-    context_metadata: Optional[Dict[str, Any]] = Field(default_factory=dict)
+    # 用户上下文元数据（简化版，不存储复杂JSON）
+    tags: Optional[str] = Field(default=None, max_length=500)  # JSON字符串存储标签
 
 
 class Conversation(ConversationBase, table=True):
@@ -46,8 +46,8 @@ class MessageBase(SQLModel):
     content: str = Field(max_length=5000)
     # message_type: user/assistant/system
     message_type: str = Field(max_length=20)
-    # 引用的文档块IDs（JSON数组）
-    cited_chunks: Optional[List[int]] = Field(default=None)
+    # 引用的文档块IDs（简化版，不存储List）
+    # sources: Optional[str] = Field(default=None, max_length=1000)  # JSON字符串存储
 
 
 class Message(MessageBase, table=True):

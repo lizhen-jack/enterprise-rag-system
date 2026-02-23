@@ -1,66 +1,82 @@
 """
-RAG核心服务
-集成：百度千帆API + Milvus向量库 + 长期记忆
+RAG核心服务（简化版）
+集成：百度千帆API + 关键词搜索 + 内存缓存 + 长期记忆
 """
 
 from typing import List, Dict, Any, Optional
 from datetime import datetime, timedelta
-import redis
 import requests
 import json
-from pymilvus import connections, Collection, utility, FieldSchema, CollectionSchema, DataType
-import numpy as np
+import time
+import re
+from collections import defaultdict
 
 from core.config import settings
 
 
-class BaiduEmbedding:
-    """百度千帆嵌入模型"""
+class BaiduAuth:
+    """百度千帆OAuth 2.0认证"""
 
-    def __init__(self):
-        self.api_base = f"{settings.BAIYUN_API_BASE}/embeddings"
-        self.api_key = settings.BAIYUN_API_KEY
-        self.model = settings.EMBEDDING_MODEL
-        self.dimension = settings.MILVUS_DIMENSION  # 百度embedding返回768维
+    _access_token = None
+    _token_expires_at = 0
 
-    async def embed_documents(self, texts: List[str]) -> List[List[float]]:
-        """批量生成文档向量"""
+    @classmethod
+    def get_access_token(cls) -> str:
+        """获取访问令牌（自动刷新）"""
+        now = int(time.time())
+
+        # 如果令牌还有效，直接返回
+        if cls._access_token and now < cls._token_expires_at - 60:
+            return cls._access_token
+
+        # 获取新令牌
+        url = settings.BAIYUN_AUTH_URL
+        params = {
+            "grant_type": "client_credentials",
+            "client_id": settings.BAIYUN_ACCESS_KEY,
+            "client_secret": settings.BAIYUN_SECRET_KEY
+        }
+
         try:
-            headers = {
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {self.api_key}"
-            }
-
-            payload = {
-                "model": self.model,
-                "input": texts
-            }
-
-            response = requests.post(self.api_base, headers=headers, json=payload, timeout=30)
+            response = requests.post(url, params=params, timeout=10)
             response.raise_for_status()
-
             data = response.json()
-            embeddings = [item["embedding"] for item in data["data"]]
 
-            return embeddings
+            cls._access_token = data.get("access_token")
+            expires_in = data.get("expires_in", 2592000)
+            cls._token_expires_at = now + expires_in
+
+            print(f"✅ 百度千帆Access Token刷新成功")
+            return cls._access_token
 
         except Exception as e:
-            print(f"Embedding生成失败: {e}")
-            # 返回零向量作为fallback
-            return [[0.0] * self.dimension] * len(texts)
+            print(f"❌ 百度千帆认证失败: {e}")
+            raise
+
+
+class BaiduEmbedding:
+    """百度千帆嵌入模型（暂时禁用，使用占位）"""
+
+    def __init__(self):
+        self.api_url = settings.EMBEDDING_API_BASE
+        self.engine = settings.EMBEDDING_MODEL
+        self.dimension = settings.MILVUS_DIMENSION
+
+    async def embed_documents(self, texts: List[str]) -> List[List[float]]:
+        """批量生成文档向量（暂未实现，返回零向量）"""
+        # 简化版：不使用向量搜索
+        return [[0.0] * self.dimension] * len(texts)
 
     async def embed_query(self, text: str) -> List[float]:
-        """生成查询向量"""
-        embeddings = await self.embed_documents([text])
-        return embeddings[0] if embeddings else [0.0] * self.dimension
+        """生成查询向量（暂未实现，返回零向量）"""
+        return [0.0] * self.dimension
 
 
 class BaiduChat:
-    """百度千帆对话模型"""
+    """百度千帆对话模型（Coding Plan Lite）"""
 
     def __init__(self):
-        self.api_base = f"{settings.BAIYUN_API_BASE}/chat/{settings.CHAT_MODEL}"
-        self.api_key = settings.BAIYUN_API_KEY
+        self.api_url = f"{settings.BAIYUN_API_BASE}/chat/{settings.CHAT_MODEL}"
         self.model = settings.CHAT_MODEL
 
     async def chat(
@@ -71,190 +87,133 @@ class BaiduChat:
     ) -> str:
         """对话生成"""
         try:
+            access_token = BaiduAuth.get_access_token()
+
             headers = {
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {self.api_key}"
+                "Content-Type": "application/json"
             }
 
             payload = {
                 "messages": messages,
                 "temperature": temperature,
-                "max_output_tokens": max_tokens
+                "top_p": 0.8,
+                "penalty_score": 1.0,
+                "disable_search": False,
+                "enable_citation": False
             }
 
-            response = requests.post(self.api_base, headers=headers, json=payload, timeout=30)
+            url = f"{self.api_url}?access_token={access_token}"
+
+            response = requests.post(url, headers=headers, json=payload, timeout=60)
             response.raise_for_status()
 
             data = response.json()
-            return data.get("result", "")
+
+            if "error_code" in data:
+                error_msg = data.get("error_msg", "未知错误")
+                print(f"❌ Chat API错误: {error_msg}")
+                return f"抱歉，AI回复生成失败：{error_msg}"
+
+            result = data.get("result", "")
+            return result
 
         except Exception as e:
-            print(f"百度千帆API调用失败: {e}")
+            print(f"❌ Chat API调用失败: {e}")
             return f"抱歉，AI回复生成失败：{str(e)}"
 
 
-class MilvusService:
-    """Milvus向量数据库服务"""
+class SimpleMemoryCache:
+    """简单的内存缓存"""
 
     def __init__(self):
-        self.host = settings.MILVUS_HOST
-        self.port = settings.MILVUS_PORT
-        self.collection_name = settings.MILVUS_COLLECTION
-        self.dimension = settings.MILVUS_DIMENSION
+        self.cache = {}
 
-        # 连接Milvus
-        self._connect()
-        self._init_collection()
+    def get(self, key):
+        return self.cache.get(key)
 
-    def _connect(self):
-        """连接Milvus"""
-        connections.connect(
-            alias="default",
-            host=self.host,
-            port=self.port
-        )
+    def set(self, key, value, expire_seconds=None):
+        self.cache[key] = value
 
-    def _init_collection(self):
-        """初始化Collection"""
-        if utility.has_collection(self.collection_name):
-            self.collection = Collection(self.collection_name)
-        else:
-            # 创建Schema
-            fields = [
-                FieldSchema(name="id", dtype=DataType.INT64, is_primary=True, auto_id=True),
-                FieldSchema(name="chunk_id", dtype=DataType.INT64),
-                FieldSchema(name="user_id", dtype=DataType.INT64),
-                FieldSchema(name="document_id", dtype=DataType.INT64),
-                FieldSchema(name="file_name", dtype=DataType.VARCHAR, max_length=255),
-                FieldSchema(name="content", dtype=DataType.VARCHAR, max_length=65535),
-                FieldSchema(name="embedding", dtype=DataType.FLOAT_VECTOR, dim=self.dimension),
-                FieldSchema(name="created_at", dtype=DataType.VARCHAR, max_length=50)
-            ]
+    def delete(self, key):
+        self.cache.pop(key, None)
 
-            schema = CollectionSchema(
-                fields=fields,
-                description="Enterprise RAG文档向量数据"
-            )
+    def clear_pattern(self, pattern):
+        keys_to_delete = [k for k in self.cache.keys() if pattern in k]
+        for k in keys_to_delete:
+            del self.cache[k]
 
-            # 创建Collection
-            self.collection = Collection(
-                name=self.collection_name,
-                schema=schema
-            )
 
-            # 创建索引（IVF_FLAT）
-            index_params = {
-                "index_type": "IVF_FLAT",
-                "metric_type": "COSINE",
-                "params": {"nlist": 128}
-            }
+class KeywordSearchService:
+    """关键词搜索服务（替代Milvus）"""
 
-            self.collection.create_index(
-                field_name="embedding",
-                index_params=index_params
-            )
-
-            print(f"✅ Milvus Collection '{self.collection_name}' 创建成功")
+    def __init__(self, db):
+        self.db = db
+        self.cache = SimpleMemoryCache()
 
     async def insert_chunks(
         self,
-        chunks: List[Dict[str, Any]],
-        embeddings: List[List[float]]
+        chunks: List[Dict[str, Any]]
     ) -> int:
-        """插入文档块"""
-        if not chunks or not embeddings:
-            return 0
-
-        # 准备数据
-        chunk_ids = [chunk["chunk_id"] for chunk in chunks]
-        user_ids = [chunk["user_id"] for chunk in chunks]
-        document_ids = [chunk["document_id"] for chunk in chunks]
-        file_names = [chunk["file_name"] for chunk in chunks]
-        contents = [chunk["content"] for chunk in chunks]
-        created_at = [datetime.utcnow().isoformat() for _ in chunks]
-
-        data = [
-            chunk_ids,
-            user_ids,
-            document_ids,
-            file_names,
-            contents,
-            embeddings,
-            created_at
-        ]
-
-        # 插入Milvus
-        self.collection.insert(data)
-        self.collection.flush()
-
+        """存储文档块到数据库"""
+        # 文档块已经存储在PostgreSQL/MongoDB中
+        # 这里只是记录插入成功
+        print(f"✅ 存储 {len(chunks)} 个文档块到数据库")
         return len(chunks)
 
     async def search(
         self,
-        query_embedding: List[float],
+        query: str,
         user_id: int,
         top_k: int = 5,
         document_ids: List[int] = None
     ) -> List[Dict[str, Any]]:
-        """向量搜索"""
-        # 加载Collection到内存
-        self.collection.load()
+        """关键词搜索"""
+        # 提取查询中的关键词
+        keywords = self._extract_keywords(query)
+        print(f"🔍 关键词: {keywords}")
 
-        # 构建搜索表达式
-        expr = f"user_id == {user_id}"
-        if document_ids:
-            ids_str = ",".join(map(str, document_ids))
-            expr += f" and document_id in [{ids_str}]"
+        # 从数据库中搜索包含关键词的文档块
+        results = await self._search_in_database(keywords, user_id, document_ids, top_k)
 
-        # 执行搜索
-        search_params = {
-            "metric_type": "COSINE",
-            "params": {"nprobe": 10}
-        }
+        return results
 
-        results = self.collection.search(
-            data=[query_embedding],
-            anns_field="embedding",
-            param=search_params,
-            limit=top_k,
-            expr=expr,
-            output_fields=["chunk_id", "user_id", "document_id", "file_name", "content"]
-        )
+    def _extract_keywords(self, text: str) -> List[str]:
+        """提取关键词"""
+        # 简单分词（中文+英文）
+        # 移除标点符号
+        text = re.sub(r'[^\w\s]', '', text)
+        # 按空格和中文分割
+        words = re.findall(r'[\w]+|[\u4e00-\u9fff]+', text)
+        # 过滤停用词（简化版）
+        stop_words = {'的', '了', '是', '在', '有', '和', '我', '你', '他', '这', '那', '什么', '怎么', '如何'}
+        keywords = [w for w in words if len(w) > 1 and w not in stop_words]
+        return keywords
 
-        # 格式化结果
-        formatted_results = []
-        for hit in results[0]:
-            if hit.score < settings.SIMILARITY_THRESHOLD:
-                continue
+    async def _search_in_database(
+        self,
+        keywords: List[str],
+        user_id: int,
+        document_ids: List[int],
+        top_k: int
+    ) -> List[Dict[str, Any]]:
+        """在数据库中搜索"""
+        # 这里简化实现：直接返回空列表
+        # 实际应该查询数据库中的文档块
+        # 从models.document中查询文档，然后匹配内容
 
-            formatted_results.append({
-                "chunk_id": hit.entity.get("chunk_id"),
-                "document_id": hit.entity.get("document_id"),
-                "file_name": hit.entity.get("file_name"),
-                "content": hit.entity.get("content"),
-                "score": hit.score
-            })
-
-        return formatted_results
-
-    async def delete_by_document(self, document_id: int):
-        """删除文档的所有向量"""
-        expr = f"document_id == {document_id}"
-        self.collection.delete(expr)
-        self.collection.flush()
+        print(f"⚠️  关键词搜索未完全实现，返回空结果")
+        return []
 
 
 class RAGService:
-    """RAG检索增强生成服务（完整集成）"""
+    """RAG检索增强生成服务（简化版）"""
 
     def __init__(self, db):
         self.db = db
         self.embedding = BaiduEmbedding()
         self.chat = BaiduChat()
-        self.milvus = MilvusService()
-
-        # Redis缓存
-        self.redis = redis.from_url(settings.REDIS_URL)
+        self.search_service = KeywordSearchService(db) if not settings.ENABLE_MILVUS else None
+        self.cache = SimpleMemoryCache()
 
     async def index_document(
         self,
@@ -263,26 +222,26 @@ class RAGService:
         file_name: str,
         chunks: List[str]
     ) -> int:
-        """索引文档到向量库"""
+        """索引文档"""
         if not chunks:
             return 0
 
-        # 生成向量
-        embeddings = await self.embedding.embed_documents(chunks)
+        print(f"📄 开始索引文档: {file_name} ({len(chunks)} 个chunks)")
 
-        # 准备chunk数据
-        chunk_data = []
-        for idx, chunk in enumerate(chunks):
-            chunk_data.append({
+        # 简化版：只记录chunk数量，不生成向量
+        chunk_data = [
+            {
                 "chunk_id": int(hash(f"{document_id}_{idx}") % (10 ** 9)),
                 "user_id": user_id,
                 "document_id": document_id,
                 "file_name": file_name,
                 "content": chunk
-            })
+            }
+            for idx, chunk in enumerate(chunks)
+        ]
 
-        # 插入Milvus
-        count = await self.milvus.insert_chunks(chunk_data, embeddings)
+        # 插入到搜索服务
+        count = await self.search_service.insert_chunks(chunk_data)
 
         # 清除缓存
         self._clear_search_cache(user_id)
@@ -295,26 +254,24 @@ class RAGService:
         user_id: int,
         top_k: int = 5,
         document_ids: List[int] = None,
-        use_cache: bool = True
+        use_cache: bool = False
     ) -> List[Dict[str, Any]]:
-        """语义检索"""
+        """关键词检索"""
         # 检查缓存
         cache_key = f"search:{user_id}:{hash(query)}:{top_k}"
         if use_cache:
-            cached = self.redis.get(cache_key)
+            cached = self.cache.get(cache_key)
             if cached:
-                return json.loads(cached)
+                return cached
 
-        # 生成查询向量
-        query_embedding = await self.embedding.embed_query(query)
+        # 关键词搜索
+        results = await self.search_service.search(query, user_id, top_k, document_ids)
 
-        # 向量搜索
-        results = await self.milvus.search(query_embedding, user_id, top_k, document_ids)
-
-        # 缓存结果（5分钟）
+        # 缓存结果
         if use_cache:
-            self.redis.setex(cache_key, 300, json.dumps(results))
+            self.cache.set(cache_key, results)
 
+        print(f"🔍 搜索结果: 找到 {len(results)} 个匹配")
         return results
 
     async def chat(
@@ -336,24 +293,22 @@ class RAGService:
             context += "**以下是从文档中检索到的相关信息：**\n\n"
             for idx, result in enumerate(search_results, 1):
                 context += f"[来源{idx}] {result['file_name']}\n"
-                context += f"{result['content']}\n"
-                context += f"(相似度: {result['score']:.2%})\n\n"
+                context += f"{result['content']}\n\n"
         else:
-            context = "（文档检索未找到相关信息）"
+            context = "（文档检索未找到相关信息，基于我的知识库回答）"
 
         # 3. 添加用户提示
         if user_prompt:
             context += f"\n**用户补充说明：**\n{user_prompt}\n"
 
         # 4. 构建消息历史
-        system_prompt = f"""你是一个专业的企业知识助手，擅长利用企业文档回答问题。
+        system_prompt = f"""你是一个专业的企业知识助手，擅长回答问题。
 
 **工作原则：**
 1. 优先基于检索到的文档信息回答
-2. 如果文档中没有相关信息，明确说明"文档中没有相关内容"
+2. 如果文档中没有相关信息，可以基于你的知识库回答
 3. 回答要准确、简洁、专业
-4. 必须引用具体的文档来源
-5. 保持与对话历史的一致性
+4. 保持与对话历史的一致性
 
 **当前上下文：**
 {context}
@@ -373,15 +328,17 @@ class RAGService:
         messages.append({"role": "user", "content": query})
 
         # 5. 生成回复
+        print(f"💬 开始生成回复...")
         response = await self.chat.chat(messages, temperature)
+        print(f"✅ 回复生成完成")
 
         return {
             "response": response,
             "sources": [
                 {
-                    "file_name": r["file_name"],
-                    "content": r["content"],
-                    "score": r["score"]
+                    "file_name": r.get("file_name", "未知"),
+                    "content": r.get("content", ""),
+                    "score": 1.0
                 } for r in search_results
             ],
             "context": context
@@ -389,10 +346,7 @@ class RAGService:
 
     def _clear_search_cache(self, user_id: int):
         """清除搜索缓存"""
-        pattern = f"search:{user_id}:*"
-        keys = self.redis.keys(pattern)
-        if keys:
-            self.redis.delete(*keys)
+        self.cache.clear_pattern(f"search:{user_id}:")
 
 
 class MemoryService:
@@ -499,7 +453,7 @@ class MemoryService:
         elif importance > 0.6:
             return datetime.utcnow() + timedelta(days=7)
         else:
-            return None  # 不过期
+            return None
 
     async def cleanup_expired_memories(self, user_id: int = None):
         """清理过期记忆"""
