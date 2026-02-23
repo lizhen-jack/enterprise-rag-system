@@ -1,13 +1,661 @@
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
-  <meta charset="UTF-8">
-  <link rel="icon" href="/favicon.ico">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>企业级RAG系统</title>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Enterprise RAG System - 企业知识库智能问答</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+
+        .container {
+            width: 100%;
+            height: 100%;
+            max-width: 1400px;
+            display: flex;
+            gap: 20px;
+            padding: 20px;
+        }
+
+        /* 左侧边栏 */
+        .sidebar {
+            width: 280px;
+            background: rgba(255, 255, 255, 0.95);
+            border-radius: 12px;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.2);
+        }
+
+        .sidebar-header {
+            text-align: center;
+            margin-bottom: 20px;
+            padding-bottom: 20px;
+            border-bottom: 2px solid #667eea;
+        }
+
+        .sidebar-header h1 {
+            font-size: 24px;
+            color: #667eea;
+            margin-bottom: 5px;
+        }
+
+        .sidebar-header p {
+            font-size: 12px;
+            color: #999;
+        }
+
+        .section-title {
+            font-size: 14px;
+            font-weight: 600;
+            color: #333;
+            margin: 20px 0 10px 0;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .upload-btn {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            padding: 12px;
+            border-radius: 8px;
+            cursor: pointer;
+            font-weight: 600;
+            transition: all 0.3s ease;
+        }
+
+        .upload-btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(102, 126, 234, 0.4);
+        }
+
+        .upload-btn:active {
+            transform: translateY(0);
+        }
+
+        #fileInput {
+            display: none;
+        }
+
+        .stats-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 10px;
+            margin-top: 10px;
+        }
+
+        .stat-card {
+            background: #f8f9fa;
+            padding: 12px;
+            border-radius: 8px;
+            text-align: center;
+        }
+
+        .stat-value {
+            font-size: 20px;
+            font-weight: 700;
+            color: #667eea;
+        }
+
+        .stat-label {
+            font-size: 11px;
+            color: #666;
+            margin-top: 4px;
+        }
+
+        .chat-list {
+            flex: 1;
+            overflow-y: auto;
+            margin-top: 10px;
+        }
+
+        .chat-item {
+            padding: 12px;
+            margin-bottom: 8px;
+            background: #f8f9fa;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            font-size: 13px;
+        }
+
+        .chat-item:hover {
+            background: #e9ecef;
+        }
+
+        .chat-item.active {
+            background: #667eea;
+            color: white;
+        }
+
+        .new-chat-btn {
+            background: #28a745;
+            color: white;
+            border: none;
+            padding: 12px;
+            border-radius: 8px;
+            cursor: pointer;
+            font-weight: 600;
+            margin-top: 10px;
+        }
+
+        /* 主聊天区域 */
+        .chat-container {
+            flex: 1;
+            background: rgba(255, 255, 255, 0.95);
+            border-radius: 12px;
+            display: flex;
+            flex-direction: column;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.2);
+            overflow: hidden;
+        }
+
+        .chat-header {
+            padding: 20px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .chat-header h2 {
+            font-size: 18px;
+            font-weight: 600;
+        }
+
+        .chat-status {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 12px;
+        }
+
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            background: #4cd964;
+            border-radius: 50%;
+            animation: pulse 2s ease-in-out infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+
+        .chat-messages {
+            flex: 1;
+            overflow-y: auto;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+        }
+
+        .message {
+            display: flex;
+            gap: 12px;
+            max-width: 80%;
+            animation: slideIn 0.3s ease;
+        }
+
+        @keyframes slideIn {
+            from {
+                opacity: 0;
+                transform: translateY(10px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        .message.user {
+            align-self: flex-end;
+            flex-direction: row-reverse;
+        }
+
+        .message.assistant {
+            align-self: flex-start;
+        }
+
+        .avatar {
+            width: 36px;
+            height: 36px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 18px;
+            flex-shrink: 0;
+        }
+
+        .message.user .avatar {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+        }
+
+        .message.assistant .avatar {
+            background: #28a745;
+            color: white;
+        }
+
+        .message-content {
+            background: #f8f9fa;
+            padding: 14px 18px;
+            border-radius: 12px;
+            line-height: 1.6;
+            font-size: 14px;
+        }
+
+        .message.user .message-content {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border-radius: 12px 12px 0 12px;
+        }
+
+        .message.assistant .message-content {
+            background: #f8f9fa;
+            color: #333;
+            border-radius: 12px 12px 12px 0;
+        }
+
+        .source-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            background: #e3f2fd;
+            color: #1976d2;
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-size: 11px;
+            margin-top: 8px;
+        }
+
+        .input-area {
+            padding: 20px;
+            border-top: 1px solid #e9ecef;
+        }
+
+        .input-wrapper {
+            display: flex;
+            gap: 12px;
+            background: #f8f9fa;
+            border-radius: 8px;
+            padding: 8px;
+        }
+
+        #messageInput {
+            flex: 1;
+            border: none;
+            background: white;
+            padding: 12px 16px;
+            border-radius: 6px;
+            font-size: 14px;
+            outline: none;
+            resize: none;
+            min-height: 44px;
+            max-height: 120px;
+        }
+
+        #messageInput:focus {
+            box-shadow: 0 0 0 2px rgba(102, 126, 234, 0.2);
+        }
+
+        #sendBtn {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-weight: 600;
+            transition: all 0.3s ease;
+        }
+
+        #sendBtn:hover {
+            transform: translateY(-1px);
+            box-shadow: 0 4px 12px rgba(102, 126, 234, 0.3);
+        }
+
+        #sendBtn:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+            transform: none;
+            box-shadow: none;
+        }
+
+        .loading {
+            display: inline-block;
+            width: 16px;
+            height: 16px;
+            border: 2px solid #ffffff;
+            border-top-color: transparent;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        /* 滚动条样式 */
+        ::-webkit-scrollbar {
+            width: 6px;
+        }
+
+        ::-webkit-scrollbar-track {
+            background: #f1f1f1;
+            border-radius: 3px;
+        }
+
+        ::-webkit-scrollbar-thumb {
+            background: #c1c1c1;
+            border-radius: 3px;
+        }
+
+        ::-webkit-scrollbar-thumb:hover {
+            background: #a8a8a8;
+        }
+
+        /* 响应式设计 */
+        @media (max-width: 768px) {
+            .container {
+                flex-direction: column;
+            }
+
+            .sidebar {
+                width: 100%;
+                max-height: 40vh;
+            }
+        }
+    </style>
 </head>
 <body>
-  <div id="app"></div>
-  <script type="module" src="/src/main.js"></script>
+    <div class="container">
+        <!-- 左侧边栏 -->
+        <div class="sidebar">
+            <div class="sidebar-header">
+                <h1>🐙 RAG System</h1>
+                <p>Enterprise Knowledge Base</p>
+            </div>
+
+            <div class="section-title">
+                <span>📄</span> 上传文档
+            </div>
+            <button class="upload-btn" onclick="document.getElementById('fileInput').click()">
+                📤 上传文件
+            </button>
+            <input type="file" id="fileInput" multiple accept=".pdf,.docx,.txt,.md">
+
+            <div class="section-title">
+                <span>📊</span> 统计信息
+            </div>
+            <div class="stats-grid">
+                <div class="stat-card">
+                    <div class="stat-value" id="docCount">0</div>
+                    <div class="stat-label">文档数</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-value" id="chunkCount">0</div>
+                    <div class="stat-label">知识块</div>
+                </div>
+            </div>
+
+            <div class="section-title">
+                <span>💬</span> 对话历史
+            </div>
+            <div class="chat-list" id="chatList">
+                <!-- 动态生成 -->
+            </div>
+
+            <button class="new-chat-btn" onclick="createNewChat()">
+                ➕ 新对话
+            </button>
+        </div>
+
+        <!-- 主聊天区域 -->
+        <div class="chat-container">
+            <div class="chat-header">
+                <h2>Enterprise RAG System</h2>
+                <div class="chat-status">
+                    <div class="status-dot"></div>
+                    <span>在线</span>
+                </div>
+            </div>
+
+            <div class="chat-messages" id="chatMessages">
+                <div class="message assistant">
+                    <div class="avatar">🤖</div>
+                    <div class="message-content">
+                        你好！我是企业知识库智能助手。我可以帮助您：
+                        <br><br>
+                        • 回答与企业知识库相关的问题<br>
+                        • 检索和总结文档内容<br>
+                        • 提供文档相似度搜索<br>
+                        • 记住对话历史<br><br>
+                        请先上传文档，然后开始提问吧！📚
+                    </div>
+                </div>
+            </div>
+
+            <div class="input-area">
+                <div class="input-wrapper">
+                    <textarea
+                        id="messageInput"
+                        placeholder="输入您的问题..."
+                        rows="1"
+                        onkeydown="handleKeyDown(event)"
+                    ></textarea>
+                    <button id="sendBtn" onclick="sendMessage()">
+                        发送
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const API_BASE = 'http://120.48.89.60:8000';
+        let currentChatId = null;
+
+        // 初始化
+        document.addEventListener('DOMContentLoaded', () => {
+            loadStats();
+            loadChatHistory();
+        });
+
+        // 加载统计信息
+        async function loadStats() {
+            try {
+                const response = await fetch(`${API_BASE}/api/stats`);
+                const data = await response.json();
+                document.getElementById('docCount').textContent = data.total_documents || 0;
+                document.getElementById('chunkCount').textContent = data.total_chunks || 0;
+            } catch (error) {
+                console.error('加载统计信息失败:', error);
+            }
+        }
+
+        // 加载对话历史
+        async function loadChatHistory() {
+            try {
+                const response = await fetch(`${API_BASE}/api/chat/history`);
+                const chats = await response.json();
+                const chatList = document.getElementById('chatList');
+                chatList.innerHTML = chats.map(chat => `
+                    <div class="chat-item ${chat.id === currentChatId ? 'active' : ''}"
+                         onclick="loadChat('${chat.id}')">
+                        <strong>${chat.title || '新对话'}</strong>
+                        <br>
+                        <small>${new Date(chat.created_at).toLocaleString('zh-CN')}</small>
+                    </div>
+                `).join('');
+            } catch (error) {
+                console.error('加载对话历史失败:', error);
+            }
+        }
+
+        // 上传文档
+        document.getElementById('fileInput').addEventListener('change', async (e) => {
+            const files = e.target.files;
+            if (!files.length) return;
+
+            const formData = new FormData();
+            for (const file of files) {
+                formData.append('files', file);
+            }
+
+            try {
+                const response = await fetch(`${API_BASE}/api/documents/upload`, {
+                    method: 'POST',
+                    body: formData
+                });
+
+                const result = await response.json();
+                if (response.ok) {
+                    addMessage('assistant', `✅ 成功上传 ${result.uploaded} 个文档，处理了 ${result.processed} 个知识块！`);
+                    loadStats();
+                } else {
+                    addMessage('assistant', `❌ 上传失败: ${result.detail}`);
+                }
+            } catch (error) {
+                addMessage('assistant', `❌ 上传错误: ${error.message}`);
+            }
+
+            e.target.value = '';
+        });
+
+        // 发送消息
+        async function sendMessage() {
+            const input = document.getElementById('messageInput');
+            const message = input.value.trim();
+            const sendBtn = document.getElementById('sendBtn');
+
+            if (!message) return;
+
+            // 添加用户消息
+            addMessage('user', message);
+            input.value = '';
+            sendBtn.disabled = true;
+            sendBtn.innerHTML = '<div class="loading"></div>';
+
+            try {
+                const response = await fetch(`${API_BASE}/api/chat`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        message: message,
+                        chat_id: currentChatId
+                    })
+                });
+
+                const result = await response.json();
+
+                if (response.ok) {
+                    currentChatId = result.chat_id;
+                    addMessage('assistant', result.answer, result.sources);
+                    loadChatHistory();
+                } else {
+                    addMessage('assistant', `❌ 错误: ${result.detail}`);
+                }
+            } catch (error) {
+                addMessage('assistant', `❌ 请求失败: ${error.message}`);
+            } finally {
+                sendBtn.disabled = false;
+                sendBtn.textContent = '发送';
+            }
+        }
+
+        // 添加消息
+        function addMessage(role, content, sources = []) {
+            const messages = document.getElementById('chatMessages');
+            const messageDiv = document.createElement('div');
+            messageDiv.className = `message ${role}`;
+
+            const avatar = role === 'user' ? '👤' : '🤖';
+            let html = `
+                <div class="avatar">${avatar}</div>
+                <div class="message-content">${content}
+            `;
+
+            if (sources && sources.length > 0) {
+                html += `<div class="source-badge">📖 来源: ${sources[0]}</div>`;
+            }
+
+            html += `</div>`;
+            messageDiv.innerHTML = html;
+            messages.appendChild(messageDiv);
+            messages.scrollTop = messages.scrollHeight;
+        }
+
+        // 处理回车键
+        function handleKeyDown(event) {
+            if (event.key === 'Enter' && !event.shiftKey) {
+                event.preventDefault();
+                sendMessage();
+            }
+        }
+
+        // 创建新对话
+        async function createNewChat() {
+            try {
+                const response = await fetch(`${API_BASE}/api/chat/new`, {
+                    method: 'POST'
+                });
+                const result = await response.json();
+                currentChatId = result.chat_id;
+                document.getElementById('chatMessages').innerHTML = `
+                    <div class="message assistant">
+                        <div class="avatar">🤖</div>
+                        <div class="message-content">
+                            开始新对话！有什么我可以帮助您的？📚
+                        </div>
+                    </div>
+                `;
+                loadChatHistory();
+            } catch (error) {
+                console.error('创建对话失败:', error);
+            }
+        }
+
+        // 加载历史对话
+        async function loadChat(chatId) {
+            currentChatId = chatId;
+            try {
+                const response = await fetch(`${API_BASE}/api/chat/history/${chatId}`);
+                const chat = await response.json();
+                const messages = document.getElementById('chatMessages');
+                messages.innerHTML = chat.messages.map(msg => `
+                    <div class="message ${msg.role}">
+                        <div class="avatar">${msg.role === 'user' ? '👤' : '🤖'}</div>
+                        <div class="message-content">${msg.content}</div>
+                    </div>
+                `).join('');
+                chat.querySelectorAll('.chat-item').forEach(item => {
+                    item.classList.remove('active');
+                });
+                event.target.classList.add('active');
+            } catch (error) {
+                console.error('加载对话失败:', error);
+            }
+        }
+    </script>
 </body>
 </html>
