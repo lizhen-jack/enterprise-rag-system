@@ -13,16 +13,26 @@ class DocumentBase(SQLModel):
     description: Optional[str] = Field(default=None, max_length=1000)
     file_type: str = Field(max_length=20)
     file_size: int  # 字节
+    filename: str = Field(max_length=255)
+    file_hash: str = Field(default="", max_length=64)
+    mime_type: str = Field(default="application/octet-stream", max_length=100)
+    total_chars: int = Field(default=0)
+    error_message: Optional[str] = Field(default=None, max_length=1000)
 
 
 class Document(DocumentBase, table=True):
     """文档表"""
     id: Optional[int] = Field(default=None, primary_key=True)
     user_id: int = Field(foreign_key="user.id", index=True)
+    filename: str = Field(max_length=255)  # 原始文件名
     file_path: str = Field(max_length=500)
-    chunk_count: int = Field(default=0)
+    file_hash: str = Field(default="", max_length=64)  # SHA256哈希，用于去重
+    mime_type: str = Field(default="application/octet-stream", max_length=100)
+    total_chars: int = Field(default=0)  # 字符总数
+    chunk_count: int = Field(default=0)  # 分块数量
     status: str = Field(default="processing", max_length=20)  # processing/completed/failed
-    indexed_at: Optional[datetime] = Field(default=None)
+    processed_at: Optional[datetime] = Field(default=None)
+    error_message: Optional[str] = Field(default=None, max_length=1000)
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
 

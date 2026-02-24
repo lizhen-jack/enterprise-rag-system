@@ -7,8 +7,14 @@ from datetime import datetime, timedelta
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 from typing import Optional, Dict
+from fastapi import Depends, HTTPException, status, Request
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.config import settings
+from core.database import get_db
+from models.user import User
 
 # 密码加密上下文
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
@@ -46,46 +52,47 @@ def decode_token(token: str) -> Dict:
         return {}
 
 
-async def get_current_user(token: str):
-    """从JWT令牌获取当前用户"""
-    from fastapi import Depends, HTTPException, status
-    from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-    from sqlalchemy import select
-    from models.user import User
-    from core.database import AsyncSessionLocal
+async def get_current_user(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    http_bearer: Optional[HTTPAuthorizationCredentials] = Depends(HTTPBearer(auto_error=False))
+) -> User:
+    """从JWT令牌获取当前用户 - 支持Header和Query参数"""
 
-    security = HTTPBearer()
+    # 优先从Authorization Header获取token
+    if http_bearer:
+        token = http_bearer.credentials
+    else:
+        # 从query参数获取token（向后兼容）
+        token = request.query_params.get("token")
 
-    credentials: HTTPAuthorizationCredentials = await security(token)
-    if not credentials:
+    if not token:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="无法验证凭证",
+            detail="缺少认证令牌",
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    token_str = credentials.credentials
-    payload = decode_token(token_str)
+    payload = decode_token(token)
 
     if not payload:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="无法验证凭证",
+            detail="无效或过期的令牌",
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    user_id: str = payload.get("sub")
-    if user_id is None:
+    username: str = payload.get("sub")
+    if username is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="无法验证凭证",
+            detail="无效的令牌数据",
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    async with AsyncSessionLocal() as db:
-        query = select(User).where(User.id == int(user_id))
-        result = await db.execute(query)
-        user = result.scalar_one_or_none()
+    # 查询用户
+    result = await db.execute(select(User).where(User.username == username))
+    user = result.scalar_one_or_none()
 
     if user is None:
         raise HTTPException(
@@ -95,17 +102,3 @@ async def get_current_user(token: str):
         )
 
     return user
-
-
-# 为了兼容现有的导入方式
-def get_current_user_depends():
-    """FastAPI依赖注入版本的get_current_user"""
-    from fastapi import Depends, HTTPException, status
-    from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-
-    async def dependency(http_bearer: HTTPAuthorizationCredentials = Depends(HTTPBearer())):
-        # 这里简化实现，实际应该解析JWT并返回用户
-        # 暂时返回None，让API路由自己处理
-        return None
-
-    return dependency

@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from typing import List
 import os
 import uuid
+import aiofiles
 
 from core.database import get_db
 from core.security import get_current_user
@@ -56,8 +57,8 @@ async def upload_document(
     unique_filename = f"{uuid.uuid4()}_{file.filename}"
     file_path = os.path.join(upload_dir, unique_filename)
 
-    async with open(file_path, "wb") as f:
-        f.write(content)
+    async with aiofiles.open(file_path, "wb") as f:
+        await f.write(content)
 
     # 创建文档记录并处理
     doc_service = get_document_service(db)

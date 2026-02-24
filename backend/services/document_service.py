@@ -52,11 +52,17 @@ class DocumentService:
             return existing
 
         # 创建文档记录
+        # 从filename中提取文件名（不带扩展名）作为title
+        file_type = os.path.splitext(filename)[1][1:] or "txt"
+        title = os.path.splitext(filename)[0] if os.path.splitext(filename)[0] else filename
+
         document = Document(
             user_id=user_id,
+            title=title,
+            file_type=file_type,
+            file_size=file_size,
             filename=filename,
             file_path=file_path,
-            file_size=file_size,
             mime_type=mime_type,
             file_hash=file_hash,
             status="processing"
@@ -267,7 +273,10 @@ class DocumentService:
         """计算文件SHA256哈希"""
         sha256_hash = hashlib.sha256()
         async with aiofiles.open(file_path, "rb") as f:
-            for byte_block in await f.read(8192):
+            while True:
+                byte_block = await f.read(8192)
+                if not byte_block:
+                    break
                 sha256_hash.update(byte_block)
 
         return sha256_hash.hexdigest()

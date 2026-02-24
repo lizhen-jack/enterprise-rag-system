@@ -473,6 +473,7 @@
 
     <script>
         const API_BASE = 'http://120.48.89.60:8000';
+        const AUTH_TOKEN = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ0ZXN0dXNlciIsImV4cCI6MTc3MjQzNTA4NH0.jt2HaGY9OLUxv7TC8ji9Fs4BZsLjZ8dJzUO0guk6hMI';
         let currentChatId = null;
 
         // 初始化
@@ -484,7 +485,7 @@
         // 加载统计信息
         async function loadStats() {
             try {
-                const response = await fetch(`${API_BASE}/api/stats`);
+                const response = await fetch(`${API_BASE}/api/v1/documents/stats?token=${AUTH_TOKEN}`);
                 const data = await response.json();
                 document.getElementById('docCount').textContent = data.total_documents || 0;
                 document.getElementById('chunkCount').textContent = data.total_chunks || 0;
@@ -496,8 +497,9 @@
         // 加载对话历史
         async function loadChatHistory() {
             try {
-                const response = await fetch(`${API_BASE}/api/chat/history`);
-                const chats = await response.json();
+                const response = await fetch(`${API_BASE}/api/v1/chat/conversations?token=${AUTH_TOKEN}`);
+                const result = await response.json();
+                const chats = result.conversations || [];
                 const chatList = document.getElementById('chatList');
                 chatList.innerHTML = chats.map(chat => `
                     <div class="chat-item ${chat.id === currentChatId ? 'active' : ''}"
@@ -517,26 +519,43 @@
             const files = e.target.files;
             if (!files.length) return;
 
-            const formData = new FormData();
+            let successCount = 0;
+            let failCount = 0;
+
+            // 逐个文件上传
             for (const file of files) {
-                formData.append('files', file);
+                const formData = new FormData();
+                formData.append('file', file);  // 使用单数 'file' 匹配后端
+
+                try {
+                    const response = await fetch(`${API_BASE}/api/v1/documents/upload?token=${AUTH_TOKEN}`, {
+                        method: 'POST',
+                        body: formData
+                    });
+
+                    if (response.ok) {
+                        successCount++;
+                        const result = await response.json();
+                        addMessage('assistant', `✅ [${file.name}] 上传成功！已处理 ${result.chunk_count} 个知识块，共 ${result.total_chars} 字符。`);
+                    } else {
+                        failCount++;
+                        const result = await response.json();
+                        const errorMsg = typeof result.detail === 'object' ? JSON.stringify(result.detail) : result.detail;
+                        addMessage('assistant', `❌ [${file.name}] 上传失败: ${errorMsg}`);
+                    }
+                } catch (error) {
+                    failCount++;
+                    addMessage('assistant', `❌ [${file.name}] 上传错误: ${error.message}`);
+                }
             }
 
-            try {
-                const response = await fetch(`${API_BASE}/api/documents/upload`, {
-                    method: 'POST',
-                    body: formData
-                });
+            // 汇总
+            if (successCount > 0) {
+                loadStats();
+            }
 
-                const result = await response.json();
-                if (response.ok) {
-                    addMessage('assistant', `✅ 成功上传 ${result.uploaded} 个文档，处理了 ${result.processed} 个知识块！`);
-                    loadStats();
-                } else {
-                    addMessage('assistant', `❌ 上传失败: ${result.detail}`);
-                }
-            } catch (error) {
-                addMessage('assistant', `❌ 上传错误: ${error.message}`);
+            if (successCount + failCount > 1) {
+                addMessage('assistant', `📊 上传汇总：成功 ${successCount} 个，失败 ${failCount} 个`);
             }
 
             e.target.value = '';
@@ -557,23 +576,24 @@
             sendBtn.innerHTML = '<div class="loading"></div>';
 
             try {
-                const response = await fetch(`${API_BASE}/api/chat`, {
+                const response = await fetch(`${API_BASE}/api/v1/chat/chat?token=${AUTH_TOKEN}`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
                         message: message,
-                        chat_id: currentChatId
+                        conversation_id: currentChatId
                     })
                 });
 
                 const result = await response.json();
 
                 if (response.ok) {
-                    currentChatId = result.chat_id;
-                    addMessage('assistant', result.answer, result.sources);
+                    currentChatId = result.conversation_id;
+                    addMessage('assistant', result.response, result.sources);
                     loadChatHistory();
                 } else {
-                    addMessage('assistant', `❌ 错误: ${result.detail}`);
+                    const errorMsg = typeof result.detail === 'object' ? JSON.stringify(result.detail, null, 2) : (result.detail || result.message || '未知错误');
+                    addMessage('assistant', `❌ 错误: ${errorMsg}`);
                 }
             } catch (error) {
                 addMessage('assistant', `❌ 请求失败: ${error.message}`);
@@ -616,11 +636,7 @@
         // 创建新对话
         async function createNewChat() {
             try {
-                const response = await fetch(`${API_BASE}/api/chat/new`, {
-                    method: 'POST'
-                });
-                const result = await response.json();
-                currentChatId = result.chat_id;
+                currentChatId = null;
                 document.getElementById('chatMessages').innerHTML = `
                     <div class="message assistant">
                         <div class="avatar">🤖</div>
@@ -639,10 +655,11 @@
         async function loadChat(chatId) {
             currentChatId = chatId;
             try {
-                const response = await fetch(`${API_BASE}/api/chat/history/${chatId}`);
-                const chat = await response.json();
-                const messages = document.getElementById('chatMessages');
-                messages.innerHTML = chat.messages.map(msg => `
+                const response = await fetch(`${API_BASE}/api/v1/chat/conversations/${chatId}/messages?token=${AUTH_TOKEN}`);
+                const result = await response.json();
+                const messages = result.messages || [];
+                const chatMessages = document.getElementById('chatMessages');
+                chatMessages.innerHTML = messages.map(msg => `
                     <div class="message ${msg.role}">
                         <div class="avatar">${msg.role === 'user' ? '👤' : '🤖'}</div>
                         <div class="message-content">${msg.content}</div>
